@@ -7,6 +7,7 @@ export const config = {
   api: {
     bodyParser: false,
   },
+    maxDuration: 60,
 };
 
 const GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
