@@ -1,7 +1,7 @@
 import formidable from "formidable";
 import fs from "fs";
 import axios from "axios";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 
 export const config = {
   api: {
@@ -9,70 +9,93 @@ export const config = {
   },
 };
 
+const COLUMNS = [
+  "Phone Name",
+  "Phone IMEI",
+  "Phone Purchased Price",
+  "Phone Selling Price",
+  "Profit",
+];
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    const { fields, files } = await parseForm(req);
+    const { files } = await parseForm(req);
 
-    const imageFile = Array.isArray(files.image) ? files.image[0] : files.image;
-    if (!imageFile) {
-      return res.status(400).json({ error: "No image uploaded" });
+    let imageFiles = files.images;
+    if (!imageFiles) {
+      return res.status(400).json({ error: "Please upload at least one image" });
+    }
+    if (!Array.isArray(imageFiles)) imageFiles = [imageFiles];
+
+    // 1. OCR every image
+    const ocrChunks = [];
+    for (let i = 0; i < imageFiles.length; i++) {
+      const text = await runOcr(imageFiles[i]);
+      ocrChunks.push(`--- Image ${i + 1} ---\n${text}`);
+    }
+    const combinedText = ocrChunks.join("\n\n");
+
+    // 2. Ask Groq to extract every phone entry across all images
+    const entries = await runGroq(combinedText);
+    if (!entries.length) {
+      return res.status(400).json({
+        error: "Could not find any phone entries in the uploaded images. Try clearer photos.",
+      });
     }
 
-    // 1. OCR the image
-    const ocrText = await runOcr(imageFile);
-    if (!ocrText || ocrText.trim() === "") {
-      return res.status(400).json({ error: "OCR could not read any text from the image" });
-    }
-
-    // 2. Load existing Excel (if provided) or set up columns for a new one
-    const excelFile = Array.isArray(files.excel) ? files.excel[0] : files.excel;
-    let workbook, sheetName, headers = [];
+    // 3. Load an existing workbook, or create a new one
+    const excelFile = files.excel;
+    const workbook = new ExcelJS.Workbook();
+    let sheet;
 
     if (excelFile) {
       const buffer = fs.readFileSync(excelFile.filepath);
-      workbook = XLSX.read(buffer, { type: "buffer" });
-      sheetName = workbook.SheetNames[0];
-      const sheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-      headers = rows[0] || [];
-    } else {
-      const columnsField = Array.isArray(fields.columns) ? fields.columns[0] : fields.columns;
-      headers = columnsField
-        ? columnsField.split(",").map((c) => c.trim()).filter(Boolean)
-        : [];
-      if (headers.length === 0) {
-        return res.status(400).json({
-          error: "Please provide column names or upload an existing Excel file",
-        });
+      await workbook.xlsx.load(buffer);
+      sheet = workbook.worksheets[0];
+      if (sheet.rowCount === 0) {
+        sheet.addRow(COLUMNS);
+        styleHeader(sheet);
       }
-      workbook = XLSX.utils.book_new();
-      sheetName = "Sheet1";
-      const sheet = XLSX.utils.aoa_to_sheet([headers]);
-      XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
+    } else {
+      sheet = workbook.addWorksheet("Phone Inventory");
+      sheet.addRow(COLUMNS);
+      styleHeader(sheet);
     }
 
-    // 3. Ask Groq to map the OCR text onto the Excel columns
-    const rowData = await runGroq(ocrText, headers);
+    // 4. Append rows with formatting
+    entries.forEach((e) => {
+      const purchase = parseNumber(e["Phone Purchased Price"]);
+      const selling = parseNumber(e["Phone Selling Price"]);
+      let profit = parseNumber(e["Profit"]);
+      if (isNaN(profit) && !isNaN(purchase) && !isNaN(selling)) {
+        profit = selling - purchase;
+      }
 
-    // 4. Append the new row
-    const sheet = workbook.Sheets[sheetName];
-    const existingRows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-    const newRow = headers.map((h) => rowData[h] ?? "");
-    existingRows.push(newRow);
-    workbook.Sheets[sheetName] = XLSX.utils.aoa_to_sheet(existingRows);
+      const row = sheet.addRow([
+        e["Phone Name"] || "",
+        e["Phone IMEI"] || "",
+        isNaN(purchase) ? "" : purchase,
+        isNaN(selling) ? "" : selling,
+        isNaN(profit) ? "" : profit,
+      ]);
+      styleDataRow(row, sheet.rowCount);
+    });
 
-    // 5. Send the updated file back for download
-    const outBuffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
-    res.setHeader("Content-Disposition", "attachment; filename=updated_data.xlsx");
+    setColumnWidths(sheet);
+    sheet.views = [{ state: "frozen", ySplit: 1 }];
+
+    // 5. Send the file back
+    const outBuffer = await workbook.xlsx.writeBuffer();
+    res.setHeader("Content-Disposition", "attachment; filename=phone_inventory.xlsx");
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     );
-    return res.status(200).send(outBuffer);
+    return res.status(200).send(Buffer.from(outBuffer));
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: err.message || "Something went wrong" });
@@ -81,12 +104,19 @@ export default async function handler(req, res) {
 
 function parseForm(req) {
   return new Promise((resolve, reject) => {
-    const form = formidable({ multiples: false, keepExtensions: true });
+    const form = formidable({ multiples: true, keepExtensions: true });
     form.parse(req, (err, fields, files) => {
       if (err) reject(err);
       else resolve({ fields, files });
     });
   });
+}
+
+function parseNumber(val) {
+  if (typeof val === "number") return val;
+  if (!val) return NaN;
+  const cleaned = String(val).replace(/[,\s]/g, "");
+  return cleaned === "" ? NaN : parseFloat(cleaned);
 }
 
 async function runOcr(imageFile) {
@@ -96,6 +126,9 @@ async function runOcr(imageFile) {
   form.append("language", "eng");
   form.append("OCREngine", "2");
   form.append("isOverlayRequired", "false");
+  form.append("isTable", "true");
+  form.append("scale", "true");
+  form.append("detectOrientation", "true");
   form.append("file", fs.createReadStream(imageFile.filepath), imageFile.originalFilename);
 
   const response = await axios.post("https://api.ocr.space/parse/image", form, {
@@ -110,18 +143,27 @@ async function runOcr(imageFile) {
   return data.ParsedResults?.[0]?.ParsedText || "";
 }
 
-async function runGroq(ocrText, headers) {
-  const systemPrompt = `You are a data extraction assistant. You will receive raw OCR text from a scanned document (receipt, form, invoice, etc.) and a list of Excel column names. Extract the correct value for each column from the OCR text. Respond ONLY with a valid JSON object whose keys are exactly the given column names and whose values are the extracted data as plain strings. If a value isn't found, use an empty string. No explanations, no markdown — JSON only.`;
-
-  const userPrompt = `Column names: ${JSON.stringify(headers)}\n\nOCR extracted text:\n${ocrText}`;
+async function runGroq(ocrText) {
+  const systemPrompt = `You are given OCR text extracted from one or more photos of a handwritten mobile phone shop ledger. The ledger has Urdu column headers, but entries are handwritten in Latin script/numbers. Each line typically follows a pattern like:
+"<serial>) <PhoneModel>   <runningBalance>   <PurchasedPrice>   <SellingPrice>   ...   <Profit>"
+Handwriting and OCR noise can cause slight misalignment — use context and typical price ranges to identify fields correctly. For every distinct phone entry found across ALL the provided images, extract:
+- "Phone Name": the phone model/label next to the serial number (e.g. "NOTE50", "Y200", "Redmi A3")
+- "Phone IMEI": an empty string "" unless a clear IMEI-like 14-16 digit number appears near the entry
+- "Phone Purchased Price": the purchase/cost amount for that phone
+- "Phone Selling Price": the sale amount for that phone
+- "Profit": the profit for that phone. If not explicitly written, calculate it as Selling Price minus Purchased Price.
+Ignore running-balance/ledger-total numbers that don't represent an actual purchase or sale amount for a specific phone entry. Skip section headers, dates, and page numbers — only output actual phone entries.
+Respond ONLY with a JSON object of this exact shape:
+{"entries": [{"Phone Name": "...", "Phone IMEI": "...", "Phone Purchased Price": 0, "Phone Selling Price": 0, "Profit": 0}]}
+Numbers must be plain numbers (no commas, no currency symbols, no quotes around numbers). No explanations, no markdown, no extra text.`;
 
   const response = await axios.post(
     "https://api.groq.com/openai/v1/chat/completions",
     {
-      model: "openai/gpt-oss-120b",
+   model: "llama-3.1-8b-instant",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
+        { role: "user", content: ocrText },
       ],
       temperature: 0,
       response_format: { type: "json_object" },
@@ -135,5 +177,43 @@ async function runGroq(ocrText, headers) {
   );
 
   const content = response.data.choices[0].message.content;
-  return JSON.parse(content);
+  const parsed = JSON.parse(content);
+  return Array.isArray(parsed.entries) ? parsed.entries : [];
+}
+
+function styleHeader(sheet) {
+  const header = sheet.getRow(1);
+  header.height = 26;
+  header.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 12 };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF6D28D9" } };
+    cell.alignment = { vertical: "middle", horizontal: "center" };
+    cell.border = { bottom: { style: "medium", color: { argb: "FF4C1D95" } } };
+  });
+}
+
+function styleDataRow(row, rowNumber) {
+  const isEven = rowNumber % 2 === 0;
+  row.eachCell((cell, colNumber) => {
+    cell.alignment = { vertical: "middle", horizontal: colNumber === 1 ? "left" : "center" };
+    cell.fill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: isEven ? "FFF5F3FF" : "FFFFFFFF" },
+    };
+    cell.border = { bottom: { style: "thin", color: { argb: "FFE5E7EB" } } };
+    if (colNumber === 3 || colNumber === 4 || colNumber === 5) {
+      cell.numFmt = '"Rs" #,##0';
+    }
+  });
+}
+
+function setColumnWidths(sheet) {
+  sheet.columns = [
+    { width: 26 },
+    { width: 22 },
+    { width: 20 },
+    { width: 20 },
+    { width: 16 },
+  ];
 }
