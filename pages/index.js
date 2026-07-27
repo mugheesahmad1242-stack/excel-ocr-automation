@@ -1,13 +1,32 @@
-
 import { useState, useRef, useEffect } from "react";
 import Head from "next/head";
+import {
+  UploadCloud,
+  X,
+  FileSpreadsheet,
+  Sparkles,
+  ImagePlus,
+  LayoutDashboard,
+  Loader2,
+} from "lucide-react";
+import Dashboard from "../components/Dashboard";
 
 const STEPS = [
   "Uploading images…",
-  "Reading text from images (OCR)…",
-  "Structuring data with AI…",
+  "Reading images with Gemini…",
+  "Structuring the data…",
   "Building your Excel file…",
 ];
+
+const SAMPLE_PATHS = ["/samples/sample-1.jpg", "/samples/sample-2.jpg", "/samples/sample-3.jpg"];
+
+function base64ToBlob(base64, mime) {
+  const byteChars = atob(base64);
+  const byteNumbers = new Array(byteChars.length);
+  for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+  const byteArray = new Uint8Array(byteNumbers);
+  return new Blob([byteArray], { type: mime });
+}
 
 export default function Home() {
   const [images, setImages] = useState([]);
@@ -16,21 +35,19 @@ export default function Home() {
   const [stepIndex, setStepIndex] = useState(0);
   const [error, setError] = useState("");
   const [dragActive, setDragActive] = useState(false);
+  const [entries, setEntries] = useState([]);
+  const [showDashboard, setShowDashboard] = useState(false);
   const stepTimer = useRef(null);
   const fileInputRef = useRef(null);
 
-  useEffect(() => {
-    return () => clearInterval(stepTimer.current);
-  }, []);
+  useEffect(() => () => clearInterval(stepTimer.current), []);
 
   const addImages = (fileList) => {
     const newFiles = Array.from(fileList).filter((f) => f.type.startsWith("image/"));
     setImages((prev) => [...prev, ...newFiles]);
   };
 
-  const removeImage = (index) => {
-    setImages((prev) => prev.filter((_, i) => i !== index));
-  };
+  const removeImage = (index) => setImages((prev) => prev.filter((_, i) => i !== index));
 
   const handleDrop = (e) => {
     e.preventDefault();
@@ -38,16 +55,36 @@ export default function Home() {
     if (e.dataTransfer.files?.length) addImages(e.dataTransfer.files);
   };
 
+  const loadSampleImages = async () => {
+    setError("");
+    try {
+      const sampleFiles = await Promise.all(
+        SAMPLE_PATHS.map(async (path, i) => {
+          const res = await fetch(path);
+          if (!res.ok) throw new Error("missing sample file");
+          const blob = await res.blob();
+          return new File([blob], `sample-${i + 1}.jpg`, { type: blob.type || "image/jpeg" });
+        })
+      );
+      setImages((prev) => [...prev, ...sampleFiles]);
+    } catch {
+      setError(
+        "Couldn't load sample images. Make sure sample-1.jpg, sample-2.jpg, sample-3.jpg are in /public/samples/."
+      );
+    }
+  };
+
   const startFakeProgress = () => {
     setStepIndex(0);
     stepTimer.current = setInterval(() => {
       setStepIndex((prev) => (prev < STEPS.length - 1 ? prev + 1 : prev));
-    }, 1800);
+    }, 2200);
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
+    setShowDashboard(false);
 
     if (images.length === 0) {
       setError("Please add at least one image.");
@@ -63,20 +100,23 @@ export default function Home() {
 
     try {
       const res = await fetch("/api/process", { method: "POST", body: formData });
+      const data = await res.json();
 
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Something went wrong");
-      }
+      if (!res.ok) throw new Error(data.error || "Something went wrong");
 
-      const blob = await res.blob();
+      const blob = base64ToBlob(
+        data.fileBase64,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      );
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "phone_inventory.xlsx";
+      a.download = data.fileName || "phone_inventory.xlsx";
       document.body.appendChild(a);
       a.click();
       a.remove();
+
+      setEntries(data.entries || []);
       setImages([]);
       setExcel(null);
     } catch (err) {
@@ -95,11 +135,13 @@ export default function Home() {
 
       <div style={styles.page}>
         <div style={styles.card} className="fade-in">
-          <div style={styles.badge}>AI-Powered</div>
+          <div style={styles.badge}>
+            <Sparkles size={13} /> AI-Powered
+          </div>
           <h1 style={styles.title}>Phone Ledger → Excel</h1>
           <p style={styles.subtitle}>
-            Upload photos of your handwritten phone ledger. We'll extract every entry —
-            Name, IMEI, Purchase Price, Selling Price and Profit — straight into an Excel sheet.
+            Upload photos of your handwritten phone ledger. We'll extract every entry — Name, IMEI,
+            Purchase Price, Selling Price and Profit — straight into an Excel sheet.
           </p>
 
           <form onSubmit={handleSubmit}>
@@ -125,28 +167,29 @@ export default function Home() {
                 onChange={(e) => addImages(e.target.files)}
                 style={{ display: "none" }}
               />
+              <UploadCloud size={26} color="#6d28d9" style={{ marginBottom: "8px" }} />
               <p style={styles.dropzoneText}>
                 <strong>Click to add photos</strong> or drag & drop them here
               </p>
               <p style={styles.dropzoneHint}>You can select multiple images at once</p>
             </div>
 
+            <button type="button" onClick={loadSampleImages} style={styles.sampleButton}>
+              <ImagePlus size={15} /> Load Sample Images
+            </button>
+
             {images.length > 0 && (
               <div style={styles.thumbGrid}>
                 {images.map((img, i) => (
                   <div key={i} style={styles.thumb} className="fade-in">
-                    <img
-                      src={URL.createObjectURL(img)}
-                      alt={img.name}
-                      style={styles.thumbImg}
-                    />
+                    <img src={URL.createObjectURL(img)} alt={img.name} style={styles.thumbImg} />
                     <button
                       type="button"
                       onClick={() => removeImage(i)}
                       style={styles.thumbRemove}
                       aria-label="Remove image"
                     >
-                      ×
+                      <X size={12} />
                     </button>
                   </div>
                 ))}
@@ -154,7 +197,9 @@ export default function Home() {
             )}
 
             <label style={styles.label}>
-              Existing Excel file (optional — leave empty to create a new one)
+              <span style={styles.labelText}>
+                <FileSpreadsheet size={14} /> Existing Excel file (optional)
+              </span>
               <input
                 type="file"
                 accept=".xlsx,.xls"
@@ -166,7 +211,7 @@ export default function Home() {
             <button type="submit" disabled={loading} style={styles.button}>
               {loading ? (
                 <span style={styles.buttonLoading}>
-                  <span className="spinner" />
+                  <Loader2 size={16} className="spin-icon" />
                   {STEPS[stepIndex]}
                 </span>
               ) : (
@@ -180,10 +225,7 @@ export default function Home() {
                   <span
                     key={i}
                     className={i === stepIndex ? "pulse-dot" : ""}
-                    style={{
-                      ...styles.dot,
-                      background: i <= stepIndex ? "#6d28d9" : "#e2e2ea",
-                    }}
+                    style={{ ...styles.dot, background: i <= stepIndex ? "#6d28d9" : "#e2e2ea" }}
                   />
                 ))}
               </div>
@@ -191,7 +233,19 @@ export default function Home() {
           </form>
 
           {error && <p style={styles.error} className="fade-in">{error}</p>}
+
+          {entries.length > 0 && !showDashboard && (
+            <button type="button" onClick={() => setShowDashboard(true)} style={styles.dashboardButton}>
+              <LayoutDashboard size={16} /> Create Dashboard
+            </button>
+          )}
         </div>
+
+        {showDashboard && entries.length > 0 && (
+          <div style={{ ...styles.card, marginTop: "20px", maxWidth: "760px" }}>
+            <Dashboard entries={entries} />
+          </div>
+        )}
       </div>
     </>
   );
@@ -201,8 +255,8 @@ const styles = {
   page: {
     minHeight: "100vh",
     display: "flex",
+    flexDirection: "column",
     alignItems: "center",
-    justifyContent: "center",
     background: "linear-gradient(160deg, #f4f4f8 0%, #ece9f7 100%)",
     padding: "24px",
   },
@@ -215,7 +269,9 @@ const styles = {
     width: "100%",
   },
   badge: {
-    display: "inline-block",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "5px",
     fontSize: "12px",
     fontWeight: 600,
     color: "#6d28d9",
@@ -223,20 +279,35 @@ const styles = {
     padding: "4px 10px",
     borderRadius: "999px",
     marginBottom: "12px",
-    letterSpacing: "0.02em",
   },
   title: { fontSize: "26px", fontWeight: 700, margin: "0 0 8px", letterSpacing: "-0.01em" },
-  subtitle: { fontSize: "14px", color: "#6b6b7a", marginBottom: "28px", lineHeight: 1.5 },
+  subtitle: { fontSize: "14px", color: "#6b6b7a", marginBottom: "24px", lineHeight: 1.5 },
   dropzone: {
     border: "1.5px dashed #e2e2ea",
     borderRadius: "14px",
-    padding: "28px 16px",
+    padding: "24px 16px",
     textAlign: "center",
     cursor: "pointer",
     transition: "all 0.15s ease",
   },
   dropzoneText: { margin: 0, fontSize: "14px", color: "#1a1a2e" },
   dropzoneHint: { margin: "4px 0 0", fontSize: "12px", color: "#9999a8" },
+  sampleButton: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "6px",
+    width: "100%",
+    marginTop: "10px",
+    padding: "10px",
+    background: "#fafafc",
+    border: "1px solid #e2e2ea",
+    borderRadius: "10px",
+    fontSize: "13px",
+    fontWeight: 500,
+    color: "#4b4b58",
+    cursor: "pointer",
+  },
   thumbGrid: {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))",
@@ -261,8 +332,9 @@ const styles = {
     border: "none",
     background: "rgba(0,0,0,0.6)",
     color: "#fff",
-    fontSize: "13px",
-    lineHeight: "20px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
     cursor: "pointer",
     padding: 0,
   },
@@ -274,6 +346,7 @@ const styles = {
     gap: "6px",
     marginTop: "22px",
   },
+  labelText: { display: "flex", alignItems: "center", gap: "6px" },
   fileInput: {
     padding: "8px",
     border: "1px solid #e2e2ea",
@@ -292,30 +365,25 @@ const styles = {
     fontSize: "15px",
     fontWeight: 600,
     cursor: "pointer",
-    transition: "background 0.15s ease",
   },
-  buttonLoading: {
+  buttonLoading: { display: "flex", alignItems: "center", justifyContent: "center", gap: "10px" },
+  progressDots: { display: "flex", justifyContent: "center", gap: "8px", marginTop: "16px" },
+  dot: { width: "7px", height: "7px", borderRadius: "50%", transition: "background 0.3s ease" },
+  error: { color: "#dc2626", marginTop: "16px", fontSize: "13px", textAlign: "center" },
+  dashboardButton: {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    gap: "10px",
-  },
-  progressDots: {
-    display: "flex",
-    justifyContent: "center",
     gap: "8px",
+    width: "100%",
     marginTop: "16px",
-  },
-  dot: {
-    width: "7px",
-    height: "7px",
-    borderRadius: "50%",
-    transition: "background 0.3s ease",
-  },
-  error: {
-    color: "#dc2626",
-    marginTop: "16px",
-    fontSize: "13px",
-    textAlign: "center",
+    padding: "12px",
+    background: "#111827",
+    color: "#fff",
+    border: "none",
+    borderRadius: "10px",
+    fontSize: "14px",
+    fontWeight: 600,
+    cursor: "pointer",
   },
 };
