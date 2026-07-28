@@ -26,18 +26,27 @@ console.log("FILES:", files);
     }
     if (!Array.isArray(imageFiles)) imageFiles = [imageFiles];
 
-    // 1. Extract entries from every image — Gemini first, OCR.space+Groq as fallback
-    const geminiEntries = [];
-    const fallbackOcrChunks = [];
+  // 1. Extract entries from every image — Gemini first, OCR.space+Groq as fallback
+const geminiEntries = [];
+const fallbackOcrChunks = [];
 
-    for (let i = 0; i < imageFiles.length; i++) {
-      const result = await extractEntriesForImage(imageFiles[i]);
-      if (result.entries) {
-        geminiEntries.push(...result.entries);
-      } else if (result.ocrText) {
-        fallbackOcrChunks.push(`--- Image ${i + 1} ---\n${result.ocrText}`);
-      }
+const results = await Promise.allSettled(
+  imageFiles.map((f) =>
+    withTimeout(extractEntriesForImage(f), 35000, "Image extraction")
+  )
+);
+
+results.forEach((result, index) => {
+  if (result.status === "fulfilled") {
+    if (result.value.entries) {
+      geminiEntries.push(...result.value.entries);
+    } else if (result.value.ocrText) {
+      fallbackOcrChunks.push(`--- Image ${index + 1} ---\n${result.value.ocrText}`);
     }
+  } else {
+    console.warn("Image failed:", result.reason.message);
+  }
+});
 
     let fallbackEntries = [];
     if (fallbackOcrChunks.length) {
@@ -133,7 +142,14 @@ function parseNumber(val) {
   const cleaned = String(val).replace(/[,\s]/g, "");
   return cleaned === "" ? NaN : parseFloat(cleaned);
 }
-
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} exceeded ${ms / 1000}s`)), ms)
+    ),
+  ]);
+}
 // ---------- Extraction: Gemini first, OCR.space+Groq fallback ----------
 
 async function extractEntriesForImage(imageFile) {
@@ -200,7 +216,10 @@ Respond ONLY with a JSON object of this exact shape, nothing else:
         response_mime_type: "application/json",
       },
     },
-    { headers: { "Content-Type": "application/json" } }
+   { 
+  headers: { "Content-Type": "application/json" },
+  timeout: 12000
+}
   );
 
   const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -229,6 +248,7 @@ async function runOcr(imageFile) {
   const response = await axios.post("https://api.ocr.space/parse/image", form, {
     headers: form.getHeaders(),
     maxBodyLength: Infinity,
+      timeout: 10000,
   });
 
   const data = response.data;
@@ -272,6 +292,7 @@ No explanations, no markdown.`;
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
+      timeout: 12000,
     }
   );
 
