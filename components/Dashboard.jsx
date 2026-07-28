@@ -13,6 +13,17 @@ import { DollarSign, PiggyBank, TrendingUp, Percent, Trophy, TrendingDown } from
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, ArcElement, Tooltip, Legend);
 
+// Colors pulled from the site's existing palette (violet accent + existing red/dark tones)
+// instead of unrelated colors, so the dashboard matches the rest of the app.
+const THEME = {
+  primary: "#6d28d9",
+  primaryDark: "#4c1d95",
+  primaryLight: "#a78bfa",
+  primaryLighter: "#c4b5fd",
+  dark: "#1a1a2e",
+  danger: "#dc2626", // same red already used for error text in index.js
+};
+
 export default function Dashboard({ entries }) {
   const stats = useMemo(() => {
     const totalRevenue = entries.reduce((s, e) => s + (e.selling || 0), 0);
@@ -43,13 +54,19 @@ export default function Dashboard({ entries }) {
   const fmt = (n) => `Rs ${Number(n || 0).toLocaleString()}`;
 
   const cards = [
-    { label: "Total Revenue", value: fmt(stats.totalRevenue), icon: DollarSign, color: "#0891b2" },
-    { label: "Total Cost", value: fmt(stats.totalCost), icon: PiggyBank, color: "#d97706" },
-    { label: "Total Profit", value: fmt(stats.totalProfit), icon: TrendingUp, color: "#16a34a" },
-    { label: "Profit Margin", value: `${stats.profitMargin.toFixed(1)}%`, icon: Percent, color: "#6d28d9" },
-    { label: "Most Profitable", value: stats.mostProfitable?.name || "-", icon: Trophy, color: "#16a34a" },
-    { label: "Least Profitable", value: stats.leastProfitable?.name || "-", icon: TrendingDown, color: "#dc2626" },
+    { label: "Total Revenue", value: fmt(stats.totalRevenue), icon: DollarSign, color: THEME.primary },
+    { label: "Total Cost", value: fmt(stats.totalCost), icon: PiggyBank, color: THEME.primaryDark },
+    { label: "Total Profit", value: fmt(stats.totalProfit), icon: TrendingUp, color: THEME.primary },
+    { label: "Profit Margin", value: `${stats.profitMargin.toFixed(1)}%`, icon: Percent, color: THEME.primaryLight },
+    { label: "Most Profitable", value: stats.mostProfitable?.name || "-", icon: Trophy, color: THEME.primary },
+    { label: "Least Profitable", value: stats.leastProfitable?.name || "-", icon: TrendingDown, color: THEME.danger },
   ];
+
+  const chartOptions = {
+    responsive: true,
+    maintainAspectRatio: false, // let the chart fill its fixed-height wrapper instead of forcing a ratio that can overflow
+    plugins: { legend: { display: false } },
+  };
 
   const revenueCostProfitData = {
     labels: ["Revenue", "Cost", "Profit"],
@@ -57,7 +74,7 @@ export default function Dashboard({ entries }) {
       {
         label: "Amount (Rs)",
         data: [stats.totalRevenue, stats.totalCost, stats.totalProfit],
-        backgroundColor: ["#0891b2", "#d97706", "#16a34a"],
+        backgroundColor: [THEME.primary, THEME.primaryLighter, THEME.primaryDark],
         borderRadius: 8,
       },
     ],
@@ -69,7 +86,7 @@ export default function Dashboard({ entries }) {
       {
         label: "Profit (Rs)",
         data: stats.top5.map((e) => e.profit),
-        backgroundColor: "#6d28d9",
+        backgroundColor: THEME.primary,
         borderRadius: 8,
       },
     ],
@@ -81,18 +98,19 @@ export default function Dashboard({ entries }) {
       {
         label: "Number of phones",
         data: stats.distribution.map((d) => d.count),
-        backgroundColor: ["#ede9fe", "#ddd6fe", "#c4b5fd", "#a78bfa", "#7c3aed"],
+        backgroundColor: ["#ede9fe", "#ddd6fe", THEME.primaryLighter, THEME.primaryLight, THEME.primary],
       },
     ],
   };
 
   return (
-    <div style={{ marginTop: "32px" }} className="fade-in">
-      <h2 style={{ fontSize: "20px", fontWeight: 700, marginBottom: "16px", color: "#1a1a2e" }}>
+    <div style={{ marginTop: "32px", overflowX: "hidden", maxWidth: "100%" }} className="fade-in">
+      <h2 style={{ fontSize: "20px", fontWeight: 700, marginBottom: "16px", color: THEME.dark }}>
         Inventory Dashboard
       </h2>
 
       <div
+        className="kpi-grid"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
@@ -109,28 +127,42 @@ export default function Dashboard({ entries }) {
               padding: "16px",
               boxShadow: "0 4px 14px rgba(0,0,0,0.05)",
               border: "1px solid #f0f0f4",
+              minWidth: 0,
             }}
           >
             <c.icon size={18} color={c.color} style={{ marginBottom: "8px" }} />
             <div style={{ fontSize: "12px", color: "#6b6b7a", marginBottom: "4px" }}>{c.label}</div>
-            <div style={{ fontSize: "16px", fontWeight: 700, color: "#1a1a2e", wordBreak: "break-word" }}>
+            <div style={{ fontSize: "16px", fontWeight: 700, color: THEME.dark, wordBreak: "break-word" }}>
               {c.value}
             </div>
           </div>
         ))}
       </div>
 
-      <div style={{ display: "grid", gap: "20px" }}>
+      <div style={{ display: "grid", gap: "20px", minWidth: 0 }}>
         <ChartCard title="Revenue vs Cost vs Profit">
-          <Bar data={revenueCostProfitData} options={{ responsive: true, plugins: { legend: { display: false } } }} />
+          <Bar data={revenueCostProfitData} options={chartOptions} />
         </ChartCard>
         <ChartCard title="Top 5 Most Profitable Phones">
-          <Bar data={top5Data} options={{ indexAxis: "y", responsive: true, plugins: { legend: { display: false } } }} />
+          <Bar data={top5Data} options={{ ...chartOptions, indexAxis: "y" }} />
         </ChartCard>
         <ChartCard title="Profit Distribution">
-          <Doughnut data={distributionData} options={{ responsive: true }} />
+          <Doughnut data={distributionData} options={chartOptions} />
         </ChartCard>
       </div>
+
+      <style jsx>{`
+        .chart-canvas-wrap {
+          position: relative;
+          width: 100%;
+          height: 240px;
+        }
+        @media (max-width: 480px) {
+          .kpi-grid {
+            grid-template-columns: repeat(2, 1fr) !important;
+          }
+        }
+      `}</style>
     </div>
   );
 }
@@ -144,10 +176,11 @@ function ChartCard({ title, children }) {
         padding: "20px",
         boxShadow: "0 4px 14px rgba(0,0,0,0.05)",
         border: "1px solid #f0f0f4",
+        minWidth: 0,
       }}
     >
       <h3 style={{ fontSize: "14px", fontWeight: 600, marginBottom: "14px", color: "#1a1a2e" }}>{title}</h3>
-      {children}
+      <div className="chart-canvas-wrap">{children}</div>
     </div>
   );
 }
