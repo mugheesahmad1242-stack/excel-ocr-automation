@@ -1,3 +1,4 @@
+import ProcessTracker from "../components/ProcessTracker";
 import { useState, useRef, useEffect } from "react";
 import Head from "next/head";
 import {
@@ -10,13 +11,6 @@ import {
   Loader2,
 } from "lucide-react";
 import Dashboard from "../components/Dashboard";
-
-const STEPS = [
-  "Uploading images…",
-  "Reading images with Gemini…",
-  "Structuring the data…",
-  "Building your Excel file…",
-];
 
 const SAMPLE_PATHS = ["/samples/sample-1.jpg", "/samples/sample-2.jpg", "/samples/sample-3.jpg"];
 
@@ -32,15 +26,14 @@ export default function Home() {
   const [images, setImages] = useState([]);
   const [excel, setExcel] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [stepIndex, setStepIndex] = useState(0);
+  const [processStage, setProcessStage] = useState("idle");
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const [entries, setEntries] = useState([]);
   const [showDashboard, setShowDashboard] = useState(false);
-  const stepTimer = useRef(null);
+  const [fileReady, setFileReady] = useState(false); // controls Dashboard button enable/disable
   const fileInputRef = useRef(null);
-
-  useEffect(() => () => clearInterval(stepTimer.current), []);
 
   const addImages = (fileList) => {
     const newFiles = Array.from(fileList).filter((f) => f.type.startsWith("image/"));
@@ -74,17 +67,54 @@ export default function Home() {
     }
   };
 
-  const startFakeProgress = () => {
-    setStepIndex(0);
-    stepTimer.current = setInterval(() => {
-      setStepIndex((prev) => (prev < STEPS.length - 1 ? prev + 1 : prev));
-    }, 2200);
+  // Wraps the upload in XMLHttpRequest instead of fetch so we can listen to
+  // real upload-progress events. fetch()'s promise doesn't resolve until the
+  // ENTIRE response (including server-side OCR/AI/Excel work) is back, so the
+  // tracker looked stuck on step 1 the whole time before. XHR lets us detect
+  // the exact moment the upload finishes and move to "processing" right then.
+  const uploadWithProgress = (formData) => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/process");
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          setUploadProgress(percent);
+        }
+      };
+
+      xhr.upload.onload = () => {
+        setUploadProgress(100);
+        setProcessStage("processing");
+      };
+
+      xhr.onload = () => {
+        let json;
+        try {
+          json = JSON.parse(xhr.responseText);
+        } catch {
+          reject(new Error("Invalid server response"));
+          return;
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(json);
+        } else {
+          reject(new Error(json.error || "Something went wrong"));
+        }
+      };
+
+      xhr.onerror = () => reject(new Error("Network error. Please try again."));
+
+      xhr.send(formData);
+    });
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
     setShowDashboard(false);
+    setFileReady(false);
 
     if (images.length === 0) {
       setError("Please add at least one image.");
@@ -96,13 +126,11 @@ export default function Home() {
     if (excel) formData.append("excel", excel);
 
     setLoading(true);
-    startFakeProgress();
+    setProcessStage("uploading");
+    setUploadProgress(0);
 
     try {
-      const res = await fetch("/api/process", { method: "POST", body: formData });
-      const data = await res.json();
-
-      if (!res.ok) throw new Error(data.error || "Something went wrong");
+      const data = await uploadWithProgress(formData);
 
       const blob = base64ToBlob(
         data.fileBase64,
@@ -116,13 +144,15 @@ export default function Home() {
       a.click();
       a.remove();
 
+      setProcessStage("done");
       setEntries(data.entries || []);
+      setFileReady(true); // file is generated & downloaded -> Dashboard button unlocks
       setImages([]);
       setExcel(null);
     } catch (err) {
       setError(err.message);
+      setProcessStage("error");
     } finally {
-      clearInterval(stepTimer.current);
       setLoading(false);
     }
   };
@@ -212,30 +242,28 @@ export default function Home() {
               {loading ? (
                 <span style={styles.buttonLoading}>
                   <Loader2 size={16} className="spin-icon" />
-                  {STEPS[stepIndex]}
+                  Processing...
                 </span>
               ) : (
                 `Extract & Download Excel${images.length ? ` (${images.length} image${images.length > 1 ? "s" : ""})` : ""}`
               )}
             </button>
-
-            {loading && (
-              <div style={styles.progressDots}>
-                {STEPS.map((_, i) => (
-                  <span
-                    key={i}
-                    className={i === stepIndex ? "pulse-dot" : ""}
-                    style={{ ...styles.dot, background: i <= stepIndex ? "#6d28d9" : "#e2e2ea" }}
-                  />
-                ))}
-              </div>
-            )}
           </form>
 
+          {loading && <ProcessTracker stage={processStage} uploadProgress={uploadProgress} />}
           {error && <p style={styles.error} className="fade-in">{error}</p>}
 
           {entries.length > 0 && !showDashboard && (
-            <button type="button" onClick={() => setShowDashboard(true)} style={styles.dashboardButton}>
+            <button
+              type="button"
+              onClick={() => setShowDashboard(true)}
+              disabled={!fileReady}
+              style={{
+                ...styles.dashboardButton,
+                opacity: fileReady ? 1 : 0.5,
+                cursor: fileReady ? "pointer" : "not-allowed",
+              }}
+            >
               <LayoutDashboard size={16} /> Create Dashboard
             </button>
           )}
